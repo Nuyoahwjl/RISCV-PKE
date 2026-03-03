@@ -6,6 +6,8 @@
 #include "elf.h"
 #include "string.h"
 #include "riscv.h"
+#include "process.h"
+#include "spike_interface/spike_file.h"
 #include "spike_interface/spike_utils.h"
 
 typedef struct elf_info_t {
@@ -227,6 +229,38 @@ typedef union {
   char *argv[MAX_CMDLINE_ARGS];
 } arg_buf;
 
+// ---------------- lab1_challenge2: DWARF .debug_line loader ----------------
+// Find a section by name (e.g. ".debug_line") and return its section header.
+static int elf_find_section(elf_ctx *ctx, const char *secname, elf_sect_header *out) {
+  // sanity: this lab uses the fixed 64-byte ELF64 section header.
+  kassert(ctx->ehdr.shentsize == sizeof(elf_sect_header));
+
+  // read the section-header-string-table (.shstrtab) header first
+  elf_sect_header shstr;
+  uint64 shstr_hdr_off = ctx->ehdr.shoff + (uint64)ctx->ehdr.shentsize * ctx->ehdr.shstrndx;
+  if (elf_fpread(ctx, &shstr, sizeof(shstr), shstr_hdr_off) != sizeof(shstr)) return -1;
+
+  // load .shstrtab into a small buffer (typically a few KB)
+  enum { SHSTRTAB_MAX = 8192 };
+  static char shstrtab[SHSTRTAB_MAX];
+  if (shstr.size >= SHSTRTAB_MAX) return -1;
+  if (elf_fpread(ctx, shstrtab, shstr.size, shstr.offset) != shstr.size) return -1;
+
+  // traverse all section headers, compare names
+  for (uint16 i = 0; i < ctx->ehdr.shnum; i++) {
+    elf_sect_header sh;
+    uint64 off = ctx->ehdr.shoff + (uint64)ctx->ehdr.shentsize * i;
+    if (elf_fpread(ctx, &sh, sizeof(sh), off) != sizeof(sh)) return -1;
+
+    const char *name = (sh.name < shstr.size) ? (shstrtab + sh.name) : "";
+    if (strcmp(name, secname) == 0) {
+      if (out) *out = sh;
+      return 0;
+    }
+  }
+  return -1;
+}
+
 //
 // returns the number (should be 1) of string(s) after PKE kernel in command line.
 // and store the string(s) in arg_bug_msg.
@@ -280,8 +314,147 @@ void load_bincode_from_host_elf(process *p) {
   // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
 
+  // lab1_challenge2: load and parse DWARF .debug_line, build addr->(file,line) mapping.
+  // This is used later to print source location when a runtime exception happens.
+  elf_sect_header dbg;
+  if (elf_find_section(&elfloader, ".debug_line", &dbg) == 0) {
+    if (dbg.size > USER_DEBUG_INFO_SIZE) {
+      panic(".debug_line section is too large: %llu bytes", (unsigned long long)dbg.size);
+    }
+
+    char *debug_buf = (char *)USER_DEBUG_INFO_BASE;
+    if (elf_fpread(&elfloader, debug_buf, dbg.size, dbg.offset) != dbg.size) {
+      panic("Fail on loading .debug_line section");
+    }
+    make_addr_line(&elfloader, debug_buf, dbg.size);
+  } else {
+    // no debug info available
+    p->debugline = 0;
+    p->dir = 0;
+    p->file = 0;
+    p->line = 0;
+    p->line_ind = 0;
+  }
+
   // close the host spike file
   spike_file_close( info.f );
 
   sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+}
+
+
+
+// Find the best addr_line entry for fault_pc.
+// Policy: choose the entry with the largest addr <= fault_pc.
+static addr_line *lookup_addr_line(process *p, uint64 fault_pc) {
+  if (!p || !p->line || p->line_ind <= 0) return 0;
+  addr_line *best = 0;
+  for (int i = 0; i < p->line_ind; i++) {
+    if (p->line[i].addr <= fault_pc) {
+      if (!best || p->line[i].addr > best->addr) best = &p->line[i];
+    }
+  }
+  return best;
+}
+
+static int build_path(process *p, uint64 file_idx, char *out, int out_sz) {
+  if (!p || !p->file || !p->dir || !out || out_sz <= 0) return -1;
+  if (file_idx >= 64) return -1;
+
+  const char *fname = p->file[file_idx].file;
+  uint64 dir_idx = p->file[file_idx].dir;
+  const char *dname = (dir_idx < 64) ? p->dir[dir_idx] : 0;
+
+  if (!fname) return -1;
+
+  // If we don't have a directory, just use file name.
+  //if (!dname || dname[0] == 0) {
+  //  strcpy(out, fname, out_sz);
+  //  return 0;
+  //}
+
+  // Join "dir/file".
+  int n = 0;
+  for (; n < out_sz - 1 && dname[n]; n++) out[n] = dname[n];
+  if (n >= out_sz - 1) {
+    out[out_sz - 1] = 0;
+    return 0;
+  }
+  if (n > 0 && out[n - 1] != '/') out[n++] = '/';
+  for (int i = 0; n < out_sz - 1 && fname[i]; i++) out[n++] = fname[i];
+  out[n] = 0;
+  return 0;
+}
+
+// Read a specific line (1-based) from a host file into out buffer.
+// Returns 0 on success.
+static int read_source_line(const char *path, uint64 lineno, char *out, int out_sz) {
+  if (!path || !out || out_sz <= 0 || lineno == 0) return -1;
+  out[0] = 0;
+
+  spike_file_t *f = spike_file_open(path, O_RDONLY, 0);
+  if (IS_ERR_VALUE(f)) return -1;
+
+  uint64 cur = 1;
+  int idx = 0;
+
+  // Read in small chunks.
+  char buf[128];
+  for (;;) {
+    ssize_t r = spike_file_read(f, buf, sizeof(buf));
+    if (r <= 0) break;
+
+    for (ssize_t i = 0; i < r; i++) {
+      char c = buf[i];
+
+      if (cur == lineno) {
+        if (c == '\n' || c == '\r') {
+          // End of the target line.
+          spike_file_close(f);
+          out[idx] = 0;
+          return 0;
+        }
+        if (idx < out_sz - 1) out[idx++] = c;
+      }
+
+      if (c == '\n') {
+        cur++;
+        if (cur > lineno) {
+          spike_file_close(f);
+          out[idx] = 0;
+          return 0;
+        }
+      }
+    }
+  }
+
+  spike_file_close(f);
+  out[idx] = 0;
+  return (idx > 0) ? 0 : -1;
+}
+
+static char *ltrim(char *s) {
+  if (!s) return s;
+  while (*s == ' ' || *s == '\t') s++;
+  return s;
+}
+
+void print_errorline(uint64 fault_pc) {
+  if (!current || !current->debugline || current->line_ind <= 0) return;
+
+  addr_line *al = lookup_addr_line(current, fault_pc);
+  if (!al) return;
+  if (!current->file || !current->dir) return;
+
+  char path[256];
+  if (build_path(current, al->file, path, sizeof(path)) != 0) return;
+
+  sprint("Runtime error at %s:%ld\n", path, (long)al->line);
+
+  // Print the actual source code line.
+  char linebuf[256];
+  if (read_source_line(path, al->line, linebuf, sizeof(linebuf)) == 0) {
+    char *trimmed = ltrim(linebuf);
+    sprint("  %s\n", trimmed);
+  }
 }

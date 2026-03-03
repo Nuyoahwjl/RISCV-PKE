@@ -6,6 +6,16 @@
 
 #define MAX_CMDLINE_ARGS 64
 
+// ====== lab1_challenge2: space for DWARF (.debug_line) info of user app ======
+// NOTE: lab1 uses bare mapping, so these are physical==virtual addresses.
+// Keep it far away from user text/data/stack/trapframe.
+#define USER_DEBUG_INFO_BASE 0x82000000
+#define USER_DEBUG_INFO_SIZE 0x00200000  // 2MB
+
+// Print the source location (file:line + the corresponding source code line) for a faulting PC.
+// The mapping comes from the user application's DWARF .debug_line section.
+void print_errorline(uint64 fault_pc);
+
 // elf header structure
 typedef struct elf_header_t {
   uint32 magic;
