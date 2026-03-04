@@ -52,6 +52,11 @@ void load_user_program(process *proc) {
   // USER_STACK_TOP = 0x7ffff000, defined in kernel/memlayout.h
   proc->trapframe->regs.sp = USER_STACK_TOP;  //virtual address of user stack top
 
+  // initialize per-process heap state for better_malloc/better_free.
+  proc->heap_head = 0;
+  proc->heap_tail = 0;
+  proc->heap_end = USER_FREE_ADDRESS_START;
+
   sprint("user frame 0x%lx, user stack 0x%lx, user kstack 0x%lx \n", proc->trapframe,
          proc->trapframe->regs.sp, proc->kstack);
 
@@ -104,3 +109,4 @@ int s_start(void) {
   // we should never reach here.
   return 0;
 }
+

@@ -26,6 +26,15 @@ typedef struct process_t {
   pagetable_t pagetable;
   // trapframe storing the context of a (User mode) process.
   trapframe* trapframe;
+
+  // --- user heap management (for better_malloc/better_free) ---
+  // virtual address of the first heap block header (0 means uninitialized).
+  uint64 heap_head;
+  // virtual address of the last heap block header.
+  uint64 heap_tail;
+  // end (exclusive) virtual address of heap that has been mapped for this process.
+  // always page-aligned.
+  uint64 heap_end;
 }process;
 
 // switch to run user app
@@ -38,3 +47,4 @@ extern process* current;
 extern uint64 g_ufree_page;
 
 #endif
+
