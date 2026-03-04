@@ -6,47 +6,44 @@
 #include "string.h"
 #include "elf.h"
 #include "process.h"
+#include "config.h"
 
 #include "spike_interface/spike_utils.h"
 
-// process is a structure defined in kernel/process.h
-process user_app;
+// In lab1_challenge3 we run one user app per hart.
+process user_app[NCPU];
 
-//
-// load the elf, and construct a "process" (with only a trapframe).
-// load_bincode_from_host_elf is defined in elf.c
-//
+// user apps are linked at different bases (see user0.lds/user1.lds). Use the same stride
+// to separate per-hart fixed addresses (stack/kstack/trapframe) in Bare mode.
+#define USER_ADDR_STRIDE 0x4000000UL
+
 void load_user_program(process *proc) {
-  // USER_TRAP_FRAME is a physical address defined in kernel/config.h
-  proc->trapframe = (trapframe *)USER_TRAP_FRAME;
-  memset(proc->trapframe, 0, sizeof(trapframe));
-  // USER_KSTACK is also a physical address defined in kernel/config.h
-  proc->kstack = USER_KSTACK;
-  proc->trapframe->regs.sp = USER_STACK;
+  int hartid = (int)read_tp();
 
-  // load_bincode_from_host_elf() is defined in kernel/elf.c
+  proc->trapframe = (trapframe *)(USER_TRAP_FRAME + (uint64)hartid * USER_ADDR_STRIDE);
+  memset(proc->trapframe, 0, sizeof(trapframe));
+
+  proc->kstack = (uint64)(USER_KSTACK + (uint64)hartid * USER_ADDR_STRIDE);
+
+  proc->trapframe->regs.sp = (uint64)(USER_STACK + (uint64)hartid * USER_ADDR_STRIDE);
+
+  // keep hartid in tp in both S/U mode
+  proc->trapframe->regs.tp = (uint64)hartid;
+
   load_bincode_from_host_elf(proc);
 }
 
-//
-// s_start: S-mode entry point of riscv-pke OS kernel.
-//
 int s_start(void) {
-  sprint("hartid = ?: Enter supervisor mode...\n");
-  // Note: we use direct (i.e., Bare mode) for memory mapping in lab1.
-  // which means: Virtual Address = Physical Address
-  // therefore, we need to set satp to be 0 for now. we will enable paging in lab2_x.
-  // 
-  // write_csr is a macro defined in kernel/riscv.h
+  int hartid = (int)read_tp();
+  sprint("hartid = %d: Enter supervisor mode...\n", hartid);
+
   write_csr(satp, 0);
 
-  // the application code (elf) is first loaded into memory, and then put into execution
-  load_user_program(&user_app);
+  load_user_program(&user_app[hartid]);
 
-  sprint("hartid = ?: Switch to user mode...\n");
-  // switch_to() is defined in kernel/process.c
-  switch_to(&user_app);
+  sprint("hartid = %d: Switch to user mode...\n", hartid);
 
-  // we should never reach here.
+  switch_to(&user_app[hartid]);
+
   return 0;
 }
