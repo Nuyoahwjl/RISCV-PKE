@@ -205,17 +205,35 @@ int do_fork( process* parent)
             free_block_filter[index] = 1;
           }
 
-          // copy and map the heap blocks
-          for (uint64 heap_block = current->user_heap.heap_bottom;
-              heap_block < current->user_heap.heap_top; heap_block += PGSIZE) {
+          // Copy-on-write fork for heap:
+          // 1) map child's heap page to the SAME physical page of parent;
+          // 2) clear PTE_W and mark both parent/child PTE as PTE_COW;
+          // 3) increase physical page refcount.
+          for (uint64 heap_block = parent->user_heap.heap_bottom;
+              heap_block < parent->user_heap.heap_top; heap_block += PGSIZE) {
             if (free_block_filter[(heap_block - heap_bottom) / PGSIZE])  // skip free blocks
               continue;
 
-            void* child_pa = alloc_page();
-            memcpy(child_pa, (void*)lookup_pa(parent->pagetable, heap_block), PGSIZE);
-            user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, (uint64)child_pa,
-                        prot_to_type(PROT_WRITE | PROT_READ, 1));
+            uint64 shared_pa = lookup_pa(parent->pagetable, heap_block);
+            assert(shared_pa);
+
+            // map into child as read-only first
+            user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, shared_pa,
+                        prot_to_type(PROT_READ, 1));
+
+            // mark both mappings as COW and read-only
+            pte_t* pte_parent = page_walk(parent->pagetable, heap_block, 0);
+            pte_t* pte_child  = page_walk(child->pagetable, heap_block, 0);
+            assert(pte_parent && pte_child);
+            *pte_parent = (*pte_parent & ~PTE_W) | PTE_COW;
+            *pte_child  = (*pte_child  & ~PTE_W) | PTE_COW;
+
+            // one more mapping to the same physical page
+            page_ref_inc((void*)shared_pa);
           }
+
+          // parent's PTEs have been updated (clearing PTE_W), flush its TLB.
+          flush_tlb();
 
           child->mapped_info[HEAP_SEGMENT].npages = parent->mapped_info[HEAP_SEGMENT].npages;
 
@@ -249,6 +267,11 @@ int do_fork( process* parent)
           parent->mapped_info[i].npages;
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
+        
+        sprint( "do_fork map code segment at pa:%lx of parent to child at va:%lx.\n",
+          lookup_pa(parent->pagetable, parent->mapped_info[i].va),
+          parent->mapped_info[i].va );
+        
         break;
     }
   }
@@ -260,3 +283,4 @@ int do_fork( process* parent)
 
   return child->pid;
 }
+

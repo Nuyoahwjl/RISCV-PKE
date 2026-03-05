@@ -10,6 +10,7 @@
 #include "vmm.h"
 #include "sched.h"
 #include "util/functions.h"
+#include "util/string.h"
 
 #include "spike_interface/spike_utils.h"
 
@@ -53,6 +54,39 @@ void handle_mtimer_trap() {
 //
 void handle_user_page_fault(uint64 mcause, uint64 sepc, uint64 stval) {
   sprint("handle_page_fault: %lx\n", stval);
+
+  // Copy-on-Write (COW) handling:
+  // When a process tries to write to a COW-marked read-only page, we allocate a new
+  // physical page, copy the content, remap it as writable, and decrease refcount of
+  // the shared page.
+  if (mcause == CAUSE_STORE_PAGE_FAULT) {
+    uint64 va = ROUNDDOWN(stval, PGSIZE);
+    pte_t* pte = page_walk(current->pagetable, va, 0);
+    if (pte && (*pte & PTE_V) && (*pte & PTE_COW)) {
+      uint64 old_pa = PTE2PA(*pte);
+      uint64 flags = PTE_FLAGS(*pte);
+
+      // if the page is shared, really copy; otherwise, just make it writable.
+      if (page_ref_get((void*)old_pa) > 1) {
+        void* new_pa = alloc_page();
+        assert(new_pa);
+        memcpy(new_pa, (void*)old_pa, PGSIZE);
+        page_ref_dec((void*)old_pa);
+
+        flags &= ~PTE_COW;
+        flags |= (PTE_W | PTE_D);
+        *pte = PA2PTE((uint64)new_pa) | flags;
+      } else {
+        flags &= ~PTE_COW;
+        flags |= (PTE_W | PTE_D);
+        *pte = PA2PTE(old_pa) | flags;
+      }
+
+      flush_tlb();
+      return;
+    }
+  }
+
   switch (mcause) {
     case CAUSE_STORE_PAGE_FAULT:
       // TODO (lab2_3): implement the operations that solve the page fault to
@@ -128,3 +162,4 @@ void smode_trap_handler(void) {
   // continue (come back to) the execution of current process.
   switch_to(current);
 }
+

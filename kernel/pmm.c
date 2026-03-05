@@ -15,6 +15,36 @@ extern uint64 g_mem_size;
 static uint64 free_mem_start_addr;  //beginning address of free memory
 static uint64 free_mem_end_addr;    //end address of free memory (not included)
 
+// --- physical page reference counting (for COW) ---
+// We only manage [DRAM_BASE, PHYS_TOP) in PKE.
+#define NPAGE ((PHYS_TOP - DRAM_BASE) / PGSIZE)
+static uint16 g_page_refcnt[NPAGE];
+
+static inline int pa2refidx(uint64 pa) {
+  if (pa < DRAM_BASE || pa >= PHYS_TOP) return -1;
+  return (int)((pa - DRAM_BASE) / PGSIZE);
+}
+
+int page_ref_get(void* pa) {
+  int idx = pa2refidx((uint64)pa);
+  if (idx < 0) return 0;
+  return g_page_refcnt[idx];
+}
+
+void page_ref_inc(void* pa) {
+  int idx = pa2refidx((uint64)pa);
+  if (idx < 0) return;
+  g_page_refcnt[idx]++;
+}
+
+int page_ref_dec(void* pa) {
+  int idx = pa2refidx((uint64)pa);
+  if (idx < 0) return 0;
+  assert(g_page_refcnt[idx] > 0);
+  g_page_refcnt[idx]--;
+  return g_page_refcnt[idx];
+}
+
 typedef struct node {
   struct node *next;
 } list_node;
@@ -39,6 +69,14 @@ void free_page(void *pa) {
   if (((uint64)pa % PGSIZE) != 0 || (uint64)pa < free_mem_start_addr || (uint64)pa >= free_mem_end_addr)
     panic("free_page 0x%lx \n", pa);
 
+  // the page should have been unmapped everywhere before being reclaimed.
+  // for pages with refcount tracking, only allow freeing when refcount is 0.
+  int idx = pa2refidx((uint64)pa);
+  if (idx >= 0) {
+    if (g_page_refcnt[idx] != 0)
+      panic("free_page on a referenced page: pa=0x%lx ref=%d\n", pa, g_page_refcnt[idx]);
+  }
+
   // insert a physical page to g_free_mem_list
   list_node *n = (list_node *)pa;
   n->next = g_free_mem_list.next;
@@ -52,6 +90,11 @@ void free_page(void *pa) {
 void *alloc_page(void) {
   list_node *n = g_free_mem_list.next;
   if (n) g_free_mem_list.next = n->next;
+
+  if (n) {
+    int idx = pa2refidx((uint64)n);
+    if (idx >= 0) g_page_refcnt[idx] = 1;
+  }
 
   return (void *)n;
 }
@@ -86,3 +129,4 @@ void pmm_init() {
   // create the list of free pages
   create_freepage_list(free_mem_start_addr, free_mem_end_addr);
 }
+
