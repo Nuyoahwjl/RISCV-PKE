@@ -9,9 +9,13 @@
 #include "vmm.h"
 #include "pmm.h"
 #include "spike_interface/spike_utils.h"
+#include "vfs.h"
+#include "proc_file.h"
 
 typedef struct elf_info_t {
-  spike_file_t *f;
+  int use_vfs;              // 0: spike host file, 1: vfs file
+  spike_file_t *f;          // used when use_vfs == 0
+  struct file *vf;          // used when use_vfs == 1
   process *p;
 } elf_info;
 
@@ -38,10 +42,15 @@ static void *elf_alloc_mb(elf_ctx *ctx, uint64 elf_pa, uint64 elf_va, uint64 siz
 //
 static uint64 elf_fpread(elf_ctx *ctx, void *dest, uint64 nb, uint64 offset) {
   elf_info *msg = (elf_info *)ctx->info;
-  // call spike file utility to load the content of elf file into memory.
-  // spike_file_pread will read the elf file (msg->f) from offset to memory (indicated by
-  // *dest) for nb bytes.
-  return spike_file_pread(msg->f, dest, nb, offset);
+  if (msg->use_vfs) {
+    if (msg->vf == NULL) return 0;
+    vfs_lseek(msg->vf, offset, LSEEK_SET);
+    ssize_t r = vfs_read(msg->vf, (char *)dest, nb);
+    if (r < 0) return 0;
+    return (uint64)r;
+  } else {
+    return spike_file_pread(msg->f, dest, nb, offset);
+  }
 }
 
 //
@@ -134,7 +143,65 @@ static size_t parse_args(arg_buf *arg_bug_msg) {
 }
 
 //
-// load the elf of user application, by using the spike file interface.
+// load an ELF from the given path.
+// - if path starts with '/', it is treated as a VFS path (hostfs/rfs).
+// - otherwise, it is treated as a host path and opened via spike file interface.
+// return 0 on success, -1 on failure.
+//
+int load_bincode_from_path(process *p, const char *path) {
+  if (path == NULL || path[0] == '\0') return -1;
+
+  sprint("Application: %s\n", path);
+
+  elf_ctx elfloader;
+  elf_info info;
+  memset(&info, 0, sizeof(info));
+  info.p = p;
+
+  if (path[0] == '/') {
+    // open through VFS
+    info.use_vfs = 1;
+    info.vf = vfs_open(path, O_RDONLY);
+    if (info.vf == NULL) {
+      sprint("load_bincode_from_path: vfs_open failed for %s\n", path);
+      return -1;
+    }
+  } else {
+    // open through spike host interface
+    info.use_vfs = 0;
+    info.f = spike_file_open(path, O_RDONLY, 0);
+    if (IS_ERR_VALUE(info.f)) {
+      sprint("load_bincode_from_path: spike_file_open failed for %s\n", path);
+      return -1;
+    }
+  }
+
+  if (elf_init(&elfloader, &info) != EL_OK) {
+    sprint("load_bincode_from_path: fail to init elfloader.\n");
+    if (info.use_vfs) vfs_close(info.vf);
+    else spike_file_close(info.f);
+    return -1;
+  }
+
+  if (elf_load(&elfloader) != EL_OK) {
+    sprint("load_bincode_from_path: fail on loading elf.\n");
+    if (info.use_vfs) vfs_close(info.vf);
+    else spike_file_close(info.f);
+    return -1;
+  }
+
+  // entry point
+  p->trapframe->epc = elfloader.ehdr.entry;
+
+  if (info.use_vfs) vfs_close(info.vf);
+  else spike_file_close(info.f);
+
+  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  return 0;
+}
+
+//
+// load the elf of user application (specified in command line) into process p.
 //
 void load_bincode_from_host_elf(process *p) {
   arg_buf arg_bug_msg;
@@ -143,30 +210,7 @@ void load_bincode_from_host_elf(process *p) {
   size_t argc = parse_args(&arg_bug_msg);
   if (!argc) panic("You need to specify the application program!\n");
 
-  sprint("Application: %s\n", arg_bug_msg.argv[0]);
-
-  //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
-  elf_ctx elfloader;
-  // elf_info is defined above, used to tie the elf file and its corresponding process.
-  elf_info info;
-
-  info.f = spike_file_open(arg_bug_msg.argv[0], O_RDONLY, 0);
-  info.p = p;
-  // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
-  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
-
-  // init elfloader context. elf_init() is defined above.
-  if (elf_init(&elfloader, &info) != EL_OK)
-    panic("fail to init elfloader.\n");
-
-  // load elf. elf_load() is defined above.
-  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
-
-  // entry (virtual, also physical in lab1_x) address
-  p->trapframe->epc = elfloader.ehdr.entry;
-
-  // close the host spike file
-  spike_file_close( info.f );
-
-  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+  // argv[0] is the application path (string in host memory)
+  if (load_bincode_from_path(p, arg_bug_msg.argv[0]) < 0)
+    panic("Fail on openning/loading the input application program.\n");
 }

@@ -65,4 +65,7 @@ elf_status elf_load(elf_ctx *ctx);
 
 void load_bincode_from_host_elf(process *p);
 
+// load an ELF file from a VFS path (e.g., /bin/app_ls)
+int load_bincode_from_path(process *p, const char *path);
+
 #endif

@@ -262,3 +262,83 @@ int do_fork( process* parent)
 
   return child->pid;
 }
+
+//
+// exec: replace current process user address space with a new program specified by path.
+// return 0 on success (will not return to old user code), -1 on failure.
+//
+int do_exec(process *proc, const char *path) {
+  if (proc == NULL || path == NULL) return -1;
+
+  // build a fresh user address space in a temporary process object
+  process newp;
+  memset(&newp, 0, sizeof(newp));
+
+  // keep pid/kstack/parent/pfiles/status for later commit
+  newp.pid = proc->pid;
+  newp.kstack = proc->kstack;
+  newp.parent = proc->parent;
+  newp.pfiles = proc->pfiles;
+  newp.status = proc->status;
+
+  // allocate core structures
+  newp.trapframe = (trapframe *)alloc_page();
+  memset(newp.trapframe, 0, sizeof(trapframe));
+
+  newp.pagetable = (pagetable_t)alloc_page();
+  memset((void *)newp.pagetable, 0, PGSIZE);
+
+  newp.mapped_info = (mapped_region *)alloc_page();
+  memset(newp.mapped_info, 0, PGSIZE);
+
+  // map user stack
+  uint64 user_stack_pa = (uint64)alloc_page();
+  newp.trapframe->regs.sp = USER_STACK_TOP;
+  user_vm_map((pagetable_t)newp.pagetable, USER_STACK_TOP - PGSIZE, PGSIZE,
+              user_stack_pa, prot_to_type(PROT_WRITE | PROT_READ, 1));
+  newp.mapped_info[STACK_SEGMENT].va = USER_STACK_TOP - PGSIZE;
+  newp.mapped_info[STACK_SEGMENT].npages = 1;
+  newp.mapped_info[STACK_SEGMENT].seg_type = STACK_SEGMENT;
+
+  // map trapframe in user space (direct mapping)
+  user_vm_map((pagetable_t)newp.pagetable, (uint64)newp.trapframe, PGSIZE,
+              (uint64)newp.trapframe, prot_to_type(PROT_WRITE | PROT_READ, 0));
+  newp.mapped_info[CONTEXT_SEGMENT].va = (uint64)newp.trapframe;
+  newp.mapped_info[CONTEXT_SEGMENT].npages = 1;
+  newp.mapped_info[CONTEXT_SEGMENT].seg_type = CONTEXT_SEGMENT;
+
+  // map S-mode trap vector section in user space (direct mapping)
+  user_vm_map((pagetable_t)newp.pagetable, (uint64)trap_sec_start, PGSIZE,
+              (uint64)trap_sec_start, prot_to_type(PROT_READ | PROT_EXEC, 0));
+  newp.mapped_info[SYSTEM_SEGMENT].va = (uint64)trap_sec_start;
+  newp.mapped_info[SYSTEM_SEGMENT].npages = 1;
+  newp.mapped_info[SYSTEM_SEGMENT].seg_type = SYSTEM_SEGMENT;
+
+  // init heap manager
+  newp.user_heap.heap_top = USER_FREE_ADDRESS_START;
+  newp.user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+  newp.user_heap.free_pages_count = 0;
+  newp.mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
+  newp.mapped_info[HEAP_SEGMENT].npages = 0;
+  newp.mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
+
+  newp.total_mapped_region = 4;
+
+  // load the new program ELF
+  if (load_bincode_from_path(&newp, path) < 0) {
+    sprint("do_exec: load_bincode_from_path failed.\n");
+    return -1;
+  }
+
+  // commit: replace proc's user space pointers with new ones.
+  proc->pagetable = newp.pagetable;
+  proc->trapframe = newp.trapframe;
+  proc->mapped_info = newp.mapped_info;
+  proc->total_mapped_region = newp.total_mapped_region;
+  proc->user_heap = newp.user_heap;
+
+  // reset accounting
+  proc->tick_count = 0;
+
+  return 0;
+}
