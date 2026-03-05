@@ -16,13 +16,105 @@
 
 #include "spike_interface/spike_utils.h"
 
+// -----------------------------------------------------------------------------
+// Semaphores (@lab3_challenge2)
+// -----------------------------------------------------------------------------
+// NOTE: keep this data structure small; otherwise, kernel size may exceed limit.
+#define NSEM 16
+
+typedef struct semaphore_t {
+  int used;
+  int value;
+  process *wait_head;
+  process *wait_tail;
+} semaphore;
+
+static semaphore sem_pool[NSEM];
+
+static inline int sem_valid(int semid) {
+  return (semid >= 0) && (semid < NSEM) && sem_pool[semid].used;
+}
+
+static inline void sem_enqueue(semaphore *sem, process *p) {
+  p->queue_next = NULL;
+  if (sem->wait_tail) {
+    sem->wait_tail->queue_next = p;
+    sem->wait_tail = p;
+  } else {
+    sem->wait_head = sem->wait_tail = p;
+  }
+}
+
+static inline process *sem_dequeue(semaphore *sem) {
+  process *p = sem->wait_head;
+  if (!p) return NULL;
+  sem->wait_head = p->queue_next;
+  if (!sem->wait_head) sem->wait_tail = NULL;
+  p->queue_next = NULL;
+  return p;
+}
+
+// create a semaphore, return semid (>=0) on success, -1 on failure.
+ssize_t sys_user_sem_new(int init_val) {
+  for (int i = 0; i < NSEM; i++) {
+    if (!sem_pool[i].used) {
+      sem_pool[i].used = 1;
+      sem_pool[i].value = init_val;
+      sem_pool[i].wait_head = NULL;
+      sem_pool[i].wait_tail = NULL;
+      return i;
+    }
+  }
+  return -1;
+}
+
+// P operation: decrement semaphore; block if value becomes negative.
+ssize_t sys_user_sem_P(int semid) {
+  if (!sem_valid(semid)) return -1;
+  semaphore *sem = &sem_pool[semid];
+
+  sem->value--;
+  if (sem->value < 0) {
+    // block current process on this semaphore.
+    current->status = BLOCKED;
+    sem_enqueue(sem, current);
+    // switch to another ready process.
+    schedule();
+  }
+  return 0;
+}
+
+// V operation: increment semaphore; wake one blocked process if any.
+ssize_t sys_user_sem_V(int semid) {
+  if (!sem_valid(semid)) return -1;
+  semaphore *sem = &sem_pool[semid];
+
+  sem->value++;
+  if (sem->value <= 0) {
+    process *p = sem_dequeue(sem);
+    if (p) {
+      insert_to_ready_queue(p);
+    }
+  }
+  return 0;
+}
+
+// free a semaphore. For simplicity, we refuse to free a semaphore that still has waiters.
+ssize_t sys_user_sem_free(int semid) {
+  if (!sem_valid(semid)) return -1;
+  semaphore *sem = &sem_pool[semid];
+
+  if (sem->wait_head) return -1;
+  sem->used = 0;
+  sem->value = 0;
+  return 0;
+}
+
 //
 // implement the SYS_user_print syscall
 //
 ssize_t sys_user_print(const char* buf, size_t n) {
-  // buf is now an address in user space of the given app's user stack,
-  // so we have to transfer it into phisical address (kernel is running in direct mapping).
-  assert( current );
+  assert(current);
   char* pa = (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)buf);
   sprint(pa);
   return 0;
@@ -33,80 +125,51 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 //
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
-  // reclaim the current process, and reschedule. added @lab3_1
-  free_process( current );
+  free_process(current);
   schedule();
   return 0;
 }
 
-//
-// maybe, the simplest implementation of malloc in the world ... added @lab2_2
-//
 uint64 sys_user_allocate_page() {
   void* pa = alloc_page();
   uint64 va;
-  // if there are previously reclaimed pages, use them first (this does not change the
-  // size of the heap)
   if (current->user_heap.free_pages_count > 0) {
-    va =  current->user_heap.free_pages_address[--current->user_heap.free_pages_count];
+    va = current->user_heap.free_pages_address[--current->user_heap.free_pages_count];
     assert(va < current->user_heap.heap_top);
   } else {
-    // otherwise, allocate a new page (this increases the size of the heap by one page)
     va = current->user_heap.heap_top;
     current->user_heap.heap_top += PGSIZE;
-
     current->mapped_info[HEAP_SEGMENT].npages++;
   }
   user_vm_map((pagetable_t)current->pagetable, va, PGSIZE, (uint64)pa,
-         prot_to_type(PROT_WRITE | PROT_READ, 1));
-
+              prot_to_type(PROT_WRITE | PROT_READ, 1));
   return va;
 }
 
-//
-// reclaim a page, indicated by "va". added @lab2_2
-//
 uint64 sys_user_free_page(uint64 va) {
   user_vm_unmap((pagetable_t)current->pagetable, va, PGSIZE, 1);
-  // add the reclaimed page to the free page list
   current->user_heap.free_pages_address[current->user_heap.free_pages_count++] = va;
   return 0;
 }
 
-//
-// kerenl entry point of naive_fork
-//
 ssize_t sys_user_fork() {
   sprint("User call fork.\n");
-  return do_fork( current );
+  return do_fork(current);
 }
 
-//
-// kerenl entry point of yield. added @lab3_2
-//
 ssize_t sys_user_yield() {
-  // TODO (lab3_2): implment the syscall of yield.
-  // hint: the functionality of yield is to give up the processor. therefore,
-  // we should set the status of currently running process to READY, insert it in
-  // the rear of ready queue, and finally, schedule a READY process to run.
-  current->status=READY;
+  current->status = READY;
   insert_to_ready_queue(current);
   schedule();
-
   return 0;
 }
 
-//
-// [a0]: the syscall number; [a1] ... [a7]: arguments to the syscalls.
-// returns the code of success, (e.g., 0 means success, fail for otherwise)
-//
 long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, long a7) {
   switch (a0) {
     case SYS_user_print:
       return sys_user_print((const char*)a1, a2);
     case SYS_user_exit:
       return sys_user_exit(a1);
-    // added @lab2_2
     case SYS_user_allocate_page:
       return sys_user_allocate_page();
     case SYS_user_free_page:
@@ -115,6 +178,17 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_fork();
     case SYS_user_yield:
       return sys_user_yield();
+
+    // added @lab3_challenge2
+    case SYS_user_sem_new:
+      return sys_user_sem_new((int)a1);
+    case SYS_user_sem_P:
+      return sys_user_sem_P((int)a1);
+    case SYS_user_sem_V:
+      return sys_user_sem_V((int)a1);
+    case SYS_user_sem_free:
+      return sys_user_sem_free((int)a1);
+
     default:
       panic("Unknown syscall %ld \n", a0);
   }
