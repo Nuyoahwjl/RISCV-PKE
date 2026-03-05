@@ -15,6 +15,9 @@ _mentry:
     # [mscratch] = 0; mscratch points the stack bottom of machine mode computer
     csrw mscratch, x0
 
+    # keep hartid in tp for multicore labs.
+    mv tp, a0
+
     # following codes allocate a 4096-byte stack for each HART, although we use only
     # ONE HART in this lab.
     la sp, stack0		# stack0 is statically defined in kernel/machine/minit.c 
