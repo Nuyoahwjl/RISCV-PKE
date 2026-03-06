@@ -34,11 +34,12 @@ ssize_t sys_user_print(const char* buf, size_t n) {
 //
 ssize_t sys_user_exit(uint64 code) {
   sprint("User exit with code:%d.\n", code);
-  // reclaim the current process, and reschedule. added @lab3_1
-  free_process( current );
+  free_process(current);
+  remove_block_and_insert(current);
   schedule();
   return 0;
 }
+
 
 //
 // maybe, the simplest implementation of malloc in the world ... added @lab2_2
@@ -95,6 +96,22 @@ ssize_t sys_user_yield() {
   schedule();
 
   return 0;
+}
+
+ssize_t sys_user_wait(long pid) {
+  return do_wait(pid);
+}
+
+ssize_t sys_user_exec(char *pathva, char *argva) {
+  char *pathpa =
+      (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)pathva);
+
+  char *argpa = 0;
+  if (argva)
+    argpa =
+        (char*)user_va_to_pa((pagetable_t)(current->pagetable), (void*)argva);
+
+  return do_exec(current, pathpa, argpa);
 }
 
 //
@@ -263,6 +280,11 @@ long do_syscall(long a0, long a1, long a2, long a3, long a4, long a5, long a6, l
       return sys_user_link((char *)a1, (char *)a2);
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
+    //
+    case SYS_user_wait:
+      return sys_user_wait(a1);
+    case SYS_user_exec:
+      return sys_user_exec((char *)a1, (char *)a2);
     default:
       panic("Unknown syscall %ld \n", a0);
   }

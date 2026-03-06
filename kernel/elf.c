@@ -109,31 +109,47 @@ elf_status elf_load(elf_ctx *ctx) {
 //
 // load the elf of user application, by using the spike file interface.
 //
-void load_bincode_from_host_elf(process *p, char *filename) {
+//
+// load the elf specified by filename from VFS.
+// return 0 on success, -1 on failure.
+//
+int load_bincode_from_path(process *p, const char *filename) {
+  if (filename == NULL || filename[0] == '\0') return -1;
+
   sprint("Application: %s\n", filename);
 
-  //elf loading. elf_ctx is defined in kernel/elf.h, used to track the loading process.
   elf_ctx elfloader;
-  // elf_info is defined above, used to tie the elf file and its corresponding process.
   elf_info info;
 
   info.f = vfs_open(filename, O_RDONLY);
   info.p = p;
-  // IS_ERR_VALUE is a macro defined in spike_interface/spike_htif.h
-  if (IS_ERR_VALUE(info.f)) panic("Fail on openning the input application program.\n");
+  if (info.f == NULL) {
+    sprint("Fail on opening the input application program: %s\n", filename);
+    return -1;
+  }
 
-  // init elfloader context. elf_init() is defined above.
-  if (elf_init(&elfloader, &info) != EL_OK)
-    panic("fail to init elfloader.\n");
+  if (elf_init(&elfloader, &info) != EL_OK) {
+    vfs_close(info.f);
+    return -1;
+  }
 
-  // load elf. elf_load() is defined above.
-  if (elf_load(&elfloader) != EL_OK) panic("Fail on loading elf.\n");
+  if (elf_load(&elfloader) != EL_OK) {
+    vfs_close(info.f);
+    return -1;
+  }
 
-  // entry (virtual, also physical in lab1_x) address
   p->trapframe->epc = elfloader.ehdr.entry;
+  vfs_close(info.f);
 
-  // close the vfs file
-  vfs_close( info.f );
+  sprint("Application program entry point (virtual address): 0x%lx\n",
+         p->trapframe->epc);
+  return 0;
+}
 
-  sprint("Application program entry point (virtual address): 0x%lx\n", p->trapframe->epc);
+//
+// load the elf of user application, by using the VFS file interface.
+//
+void load_bincode_from_host_elf(process *p, char *filename) {
+  if (load_bincode_from_path(p, filename) < 0)
+    panic("Fail on opening/loading the input application program.\n");
 }

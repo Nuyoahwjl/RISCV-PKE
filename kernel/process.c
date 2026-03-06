@@ -179,86 +179,262 @@ int free_process( process* proc ) {
 // segments (code, system) of the parent to child. the stack segment remains unchanged
 // for the child.
 //
-int do_fork( process* parent)
-{
-  sprint( "will fork a child from parent %d.\n", parent->pid );
+int do_fork(process* parent) {
+  sprint("will fork a child from parent %d.\n", parent->pid);
   process* child = alloc_process();
 
-  for( int i=0; i<parent->total_mapped_region; i++ ){
-    // browse parent's vm space, and copy its trapframe and data segments,
-    // map its code segment.
-    switch( parent->mapped_info[i].seg_type ){
+  for (int i = 0; i < parent->total_mapped_region; i++) {
+    switch (parent->mapped_info[i].seg_type) {
       case CONTEXT_SEGMENT:
         *child->trapframe = *parent->trapframe;
         break;
-      case STACK_SEGMENT:
-        memcpy( (void*)lookup_pa(child->pagetable, child->mapped_info[STACK_SEGMENT].va),
-          (void*)lookup_pa(parent->pagetable, parent->mapped_info[i].va), PGSIZE );
-        break;
-      case HEAP_SEGMENT:
-        // build a same heap for child process.
 
-        // convert free_pages_address into a filter to skip reclaimed blocks in the heap
-        // when mapping the heap blocks
+      case STACK_SEGMENT:
+        memcpy((void*)lookup_pa(child->pagetable, child->mapped_info[STACK_SEGMENT].va),
+               (void*)lookup_pa(parent->pagetable, parent->mapped_info[i].va),
+               PGSIZE);
+        break;
+
+      case HEAP_SEGMENT: {
         int free_block_filter[MAX_HEAP_PAGES];
-        memset(free_block_filter, 0, MAX_HEAP_PAGES);
+        memset(free_block_filter, 0, sizeof(free_block_filter));
+
         uint64 heap_bottom = parent->user_heap.heap_bottom;
-        for (int i = 0; i < parent->user_heap.free_pages_count; i++) {
-          int index = (parent->user_heap.free_pages_address[i] - heap_bottom) / PGSIZE;
+        for (int j = 0; j < parent->user_heap.free_pages_count; j++) {
+          int index =
+              (parent->user_heap.free_pages_address[j] - heap_bottom) / PGSIZE;
           free_block_filter[index] = 1;
         }
 
-        // copy and map the heap blocks
-        for (uint64 heap_block = current->user_heap.heap_bottom;
-             heap_block < current->user_heap.heap_top; heap_block += PGSIZE) {
-          if (free_block_filter[(heap_block - heap_bottom) / PGSIZE])  // skip free blocks
+        for (uint64 heap_block = parent->user_heap.heap_bottom;
+             heap_block < parent->user_heap.heap_top;
+             heap_block += PGSIZE) {
+          if (free_block_filter[(heap_block - heap_bottom) / PGSIZE])
             continue;
 
           void* child_pa = alloc_page();
           memcpy(child_pa, (void*)lookup_pa(parent->pagetable, heap_block), PGSIZE);
-          user_vm_map((pagetable_t)child->pagetable, heap_block, PGSIZE, (uint64)child_pa,
+          user_vm_map((pagetable_t)child->pagetable,
+                      heap_block,
+                      PGSIZE,
+                      (uint64)child_pa,
                       prot_to_type(PROT_WRITE | PROT_READ, 1));
         }
 
-        child->mapped_info[HEAP_SEGMENT].npages = parent->mapped_info[HEAP_SEGMENT].npages;
-
-        // copy the heap manager from parent to child
-        memcpy((void*)&child->user_heap, (void*)&parent->user_heap, sizeof(parent->user_heap));
+        child->mapped_info[HEAP_SEGMENT].npages =
+            parent->mapped_info[HEAP_SEGMENT].npages;
+        memcpy((void*)&child->user_heap,
+               (void*)&parent->user_heap,
+               sizeof(parent->user_heap));
         break;
-      case CODE_SEGMENT:
-        // TODO (lab3_1): implment the mapping of child code segment to parent's
-        // code segment.
-        // hint: the virtual address mapping of code segment is tracked in mapped_info
-        // page of parent's process structure. use the information in mapped_info to
-        // retrieve the virtual to physical mapping of code segment.
-        // after having the mapping information, just map the corresponding virtual
-        // address region of child to the physical pages that actually store the code
-        // segment of parent process.
-        // DO NOT COPY THE PHYSICAL PAGES, JUST MAP THEM.
-        map_pages(
-          child->pagetable,
-          parent->mapped_info[i].va,
-          parent->mapped_info[i].npages*PGSIZE,
-          lookup_pa(parent->pagetable,
-          parent->mapped_info[i].va),
-          prot_to_type(
-            PROT_EXEC|PROT_READ,1
-        ));
+      }
 
-        // after mapping, register the vm region (do not delete codes below!)
-        child->mapped_info[child->total_mapped_region].va = parent->mapped_info[i].va;
+      case CODE_SEGMENT:
+        map_pages(child->pagetable,
+                  parent->mapped_info[i].va,
+                  parent->mapped_info[i].npages * PGSIZE,
+                  lookup_pa(parent->pagetable, parent->mapped_info[i].va),
+                  prot_to_type(PROT_EXEC | PROT_READ, 1));
+
+        child->mapped_info[child->total_mapped_region].va =
+            parent->mapped_info[i].va;
         child->mapped_info[child->total_mapped_region].npages =
-          parent->mapped_info[i].npages;
+            parent->mapped_info[i].npages;
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
         break;
+
+      case DATA_SEGMENT: {
+        uint64 start_va = parent->mapped_info[i].va;
+        int pages = parent->mapped_info[i].npages;
+
+        for (int k = 0; k < pages; k++) {
+          uint64 va = start_va + (uint64)k * PGSIZE;
+          uint64 old_pa = lookup_pa(parent->pagetable, va);
+
+          char *pa_copy = alloc_page();
+          memcpy(pa_copy, (void *)old_pa, PGSIZE);
+
+          map_pages(child->pagetable,
+                    va,
+                    PGSIZE,
+                    (uint64)pa_copy,
+                    prot_to_type(PROT_READ | PROT_WRITE, 1));
+        }
+
+        child->mapped_info[child->total_mapped_region].va =
+            parent->mapped_info[i].va;
+        child->mapped_info[child->total_mapped_region].npages =
+            parent->mapped_info[i].npages;
+        child->mapped_info[child->total_mapped_region].seg_type = DATA_SEGMENT;
+        child->total_mapped_region++;
+        
+        sprint( "do_fork map code segment at pa:%lx of parent to child at va:%lx.\n",
+          lookup_pa(parent->pagetable, parent->mapped_info[i].va),
+          parent->mapped_info[i].va );
+        
+        break;
+      }
     }
   }
 
   child->status = READY;
   child->trapframe->regs.a0 = 0;
   child->parent = parent;
-  insert_to_ready_queue( child );
+  insert_to_ready_queue(child);
 
   return child->pid;
+}
+
+int do_wait(int pid) {
+  while (1) {
+    int has_child = 0;
+
+    for (int i = 0; i < NPROC; i++) {
+      process *cp = &procs[i];
+
+      if (cp->parent != current)
+        continue;
+
+      if (pid != -1 && cp->pid != (uint64)pid)
+        continue;
+
+      has_child = 1;
+      if (cp->status == ZOMBIE) {
+        cp->status = FREE;
+        return cp->pid;
+      }
+    }
+
+    if (!has_child)
+      return -1;
+
+    insert_to_blocked_queue(current);
+    schedule();
+  }
+}
+
+int do_exec(process *proc, const char *path, const char *arg) {
+  if (proc == NULL || path == NULL) return -1;
+
+  char kpath[MAX_PATH_LEN];
+  char karg[MAX_PATH_LEN];
+  memset(kpath, 0, sizeof(kpath));
+  memset(karg, 0, sizeof(karg));
+  strcpy(kpath, path);
+  if (arg) strcpy(karg, arg);
+
+  // 用临时 process 构造新的用户地址空间
+  process newp;
+  memset(&newp, 0, sizeof(newp));
+
+  // 保留当前进程的“身份”和文件管理结构
+  newp.pid = proc->pid;
+  newp.kstack = proc->kstack;
+  newp.parent = proc->parent;
+  newp.pfiles = proc->pfiles;
+  newp.status = proc->status;
+
+  // trapframe
+  newp.trapframe = (trapframe *)alloc_page();
+  memset(newp.trapframe, 0, sizeof(trapframe));
+
+  // pagetable
+  newp.pagetable = (pagetable_t)alloc_page();
+  memset((void *)newp.pagetable, 0, PGSIZE);
+
+  // mapped_info
+  newp.mapped_info = (mapped_region *)alloc_page();
+  memset(newp.mapped_info, 0, PGSIZE);
+
+  // user stack
+  uint64 user_stack_pa = (uint64)alloc_page();
+  newp.trapframe->regs.sp = USER_STACK_TOP;
+  user_vm_map((pagetable_t)newp.pagetable,
+              USER_STACK_TOP - PGSIZE,
+              PGSIZE,
+              user_stack_pa,
+              prot_to_type(PROT_WRITE | PROT_READ, 1));
+  newp.mapped_info[STACK_SEGMENT].va = USER_STACK_TOP - PGSIZE;
+  newp.mapped_info[STACK_SEGMENT].npages = 1;
+  newp.mapped_info[STACK_SEGMENT].seg_type = STACK_SEGMENT;
+
+  // trapframe direct mapping
+  user_vm_map((pagetable_t)newp.pagetable,
+              (uint64)newp.trapframe,
+              PGSIZE,
+              (uint64)newp.trapframe,
+              prot_to_type(PROT_WRITE | PROT_READ, 0));
+  newp.mapped_info[CONTEXT_SEGMENT].va = (uint64)newp.trapframe;
+  newp.mapped_info[CONTEXT_SEGMENT].npages = 1;
+  newp.mapped_info[CONTEXT_SEGMENT].seg_type = CONTEXT_SEGMENT;
+
+  // trap vector section
+  user_vm_map((pagetable_t)newp.pagetable,
+              (uint64)trap_sec_start,
+              PGSIZE,
+              (uint64)trap_sec_start,
+              prot_to_type(PROT_READ | PROT_EXEC, 0));
+  newp.mapped_info[SYSTEM_SEGMENT].va = (uint64)trap_sec_start;
+  newp.mapped_info[SYSTEM_SEGMENT].npages = 1;
+  newp.mapped_info[SYSTEM_SEGMENT].seg_type = SYSTEM_SEGMENT;
+
+  // heap manager
+  newp.user_heap.heap_top = USER_FREE_ADDRESS_START;
+  newp.user_heap.heap_bottom = USER_FREE_ADDRESS_START;
+  newp.user_heap.free_pages_count = 0;
+  newp.mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
+  newp.mapped_info[HEAP_SEGMENT].npages = 0;
+  newp.mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
+
+  newp.total_mapped_region = 4;
+
+  // 装入新的 ELF
+  if (load_bincode_from_path(&newp, kpath) < 0) {
+    sprint("do_exec: load_bincode_from_path failed.\n");
+    return -1;
+  }
+
+  // 传一个参数给新程序：argc=1, argv[0]=arg
+  if (arg != NULL) {
+    uint64 arg_page_va = USER_FREE_ADDRESS_START;
+    uint64 arg_page_pa = (uint64)alloc_page();
+    memset((void *)arg_page_pa, 0, PGSIZE);
+
+    user_vm_map((pagetable_t)newp.pagetable,
+                arg_page_va,
+                PGSIZE,
+                arg_page_pa,
+                prot_to_type(PROT_WRITE | PROT_READ, 1));
+
+    char *arg_str_va = (char *)arg_page_va;
+    uint64 *argv_va = (uint64 *)(arg_page_va + 128);
+
+    char *arg_page_kva =
+        (char *)lookup_pa((pagetable_t)newp.pagetable, arg_page_va);
+
+    strcpy(arg_page_kva, karg);
+    ((uint64 *)(arg_page_kva + 128))[0] = (uint64)arg_str_va;
+    ((uint64 *)(arg_page_kva + 128))[1] = 0;
+
+    newp.trapframe->regs.a0 = 1;              // argc
+    newp.trapframe->regs.a1 = (uint64)argv_va; // argv
+
+    // 占掉 heap 首页，避免后续 naive_malloc 覆盖参数页
+    newp.user_heap.heap_top += PGSIZE;
+    newp.mapped_info[HEAP_SEGMENT].npages = 1;
+  } else {
+    newp.trapframe->regs.a0 = 0;
+    newp.trapframe->regs.a1 = 0;
+  }
+
+  // 提交新的用户地址空间
+  proc->pagetable = newp.pagetable;
+  proc->trapframe = newp.trapframe;
+  proc->mapped_info = newp.mapped_info;
+  proc->total_mapped_region = newp.total_mapped_region;
+  proc->user_heap = newp.user_heap;
+  proc->tick_count = 0;
+
+  return 0;
 }
