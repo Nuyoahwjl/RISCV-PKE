@@ -9,11 +9,24 @@
 
 int printu(const char *s, ...);
 int exit(int code);
+
 void* naive_malloc();
 void naive_free(void* va);
+void* better_malloc(int n);
+void better_free(void* va);
+
 int fork();
 void yield();
 int wait(int pid);
+int exec(const char *pathname, const char *arg);
+
+int print_backtrace(int n);
+void printpa(int *va);
+
+int sem_new(int init_val);
+int sem_P(int sem);
+int sem_V(int sem);
+int sem_free(int sem);
 
 // added @ lab4_1
 int open(const char *pathname, int flags);
@@ -33,8 +46,7 @@ int closedir_u(int fd);
 // added @ lab4_3
 int link_u(const char *fn1, const char *fn2);
 int unlink_u(const char *fn);
-
-// added @ lab4_challenge3
-int exec(const char *pathname, const char *arg);
+int read_cwd(char *path);
+int change_cwd(const char *path);
 
 #endif

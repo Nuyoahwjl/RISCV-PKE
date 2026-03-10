@@ -68,7 +68,7 @@ pte_t *page_walk(pagetable_t page_dir, uint64 va, int alloc) {
       pt = (pagetable_t)PTE2PA(*pte);
     } else { //PTE invalid (not exist).
       // allocate a page (to be the new pagetable), if alloc == 1
-      if( alloc && ((pt = (pte_t *)alloc_page(1)) != 0) ){
+      if( alloc && ((pt = (pte_t *)alloc_page()) != 0) ){
         memset(pt, 0, PGSIZE);
         // writes the physical address of newly allocated page to pte, to establish the
         // page table tree.
@@ -179,17 +179,23 @@ void user_vm_map(pagetable_t page_dir, uint64 va, uint64 size, uint64 pa, int pe
 // reclaim the physical pages if free!=0
 //
 void user_vm_unmap(pagetable_t page_dir, uint64 va, uint64 size, int free) {
-  // TODO (lab2_2): implement user_vm_unmap to disable the mapping of the virtual pages
-  // in [va, va+size], and free the corresponding physical pages used by the virtual
-  // addresses when if 'free' (the last parameter) is not zero.
-  // basic idea here is to first locate the PTEs of the virtual pages, and then reclaim
-  // (use free_page() defined in pmm.c) the physical pages. lastly, invalidate the PTEs.
-  // as naive_free reclaims only one page at a time, you only need to consider one page
-  // to make user/app_naive_malloc to behave correctly.
-  pte_t* PTE = page_walk(page_dir,va,0);
-  free_page((void*)((*PTE >> 10)<<12));
-  *PTE &= (~PTE_V);
+  uint64 first = ROUNDDOWN(va, PGSIZE);
+  uint64 last = ROUNDDOWN(va + size - 1, PGSIZE);
 
+  for (uint64 a = first; a <= last; a += PGSIZE) {
+    pte_t *pte = page_walk(page_dir, a, 0);
+    if (pte == 0 || (*pte & PTE_V) == 0) continue;
+
+    if (free) {
+      uint64 pa = PTE2PA(*pte);
+      if (page_ref_dec((void *)pa) == 0)
+        free_page((void *)pa);
+    }
+
+    *pte = 0;
+  }
+
+  flush_tlb();
 }
 
 //
@@ -209,3 +215,5 @@ void print_proc_vmspace(process* proc) {
     sprint( ", mapped to pa:%lx\n", lookup_pa(proc->pagetable, proc->mapped_info[i].va) );
   }
 }
+
+

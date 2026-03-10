@@ -144,6 +144,17 @@ process* alloc_process() {
   procs[i].user_heap.heap_bottom = USER_FREE_ADDRESS_START;
   procs[i].user_heap.free_pages_count = 0;
 
+  // initialize metadata used by better_malloc/better_free
+  procs[i].heap_head = 0;
+  procs[i].heap_tail = 0;
+  procs[i].heap_end = USER_FREE_ADDRESS_START;
+
+  // initialize debug-line mapping info
+  procs[i].debugline = 0;
+  procs[i].dir = 0;
+  procs[i].file = 0;
+  procs[i].line = 0;
+  procs[i].line_ind = 0;
   // map user heap in userspace
   procs[i].mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
   procs[i].mapped_info[HEAP_SEGMENT].npages = 0;  // no pages are mapped to heap yet.
@@ -206,26 +217,46 @@ int do_fork(process* parent) {
           free_block_filter[index] = 1;
         }
 
+        // copy-on-write fork for heap pages
         for (uint64 heap_block = parent->user_heap.heap_bottom;
              heap_block < parent->user_heap.heap_top;
              heap_block += PGSIZE) {
           if (free_block_filter[(heap_block - heap_bottom) / PGSIZE])
             continue;
 
-          void* child_pa = alloc_page();
-          memcpy(child_pa, (void*)lookup_pa(parent->pagetable, heap_block), PGSIZE);
+          uint64 shared_pa = lookup_pa(parent->pagetable, heap_block);
+          assert(shared_pa);
+
+          // map into child as read-only first
           user_vm_map((pagetable_t)child->pagetable,
                       heap_block,
                       PGSIZE,
-                      (uint64)child_pa,
-                      prot_to_type(PROT_WRITE | PROT_READ, 1));
+                      shared_pa,
+                      prot_to_type(PROT_READ, 1));
+
+          // mark both mappings as COW and read-only
+          pte_t *pte_parent = page_walk(parent->pagetable, heap_block, 0);
+          pte_t *pte_child = page_walk(child->pagetable, heap_block, 0);
+          assert(pte_parent && pte_child);
+          *pte_parent = (*pte_parent & ~PTE_W) | PTE_COW;
+          *pte_child = (*pte_child & ~PTE_W) | PTE_COW;
+
+          page_ref_inc((void *)shared_pa);
         }
+
+        // parent PTE permission changed
+        flush_tlb();
 
         child->mapped_info[HEAP_SEGMENT].npages =
             parent->mapped_info[HEAP_SEGMENT].npages;
-        memcpy((void*)&child->user_heap,
-               (void*)&parent->user_heap,
+        memcpy((void *)&child->user_heap,
+               (void *)&parent->user_heap,
                sizeof(parent->user_heap));
+
+        child->heap_head = parent->heap_head;
+        child->heap_tail = parent->heap_tail;
+        child->heap_end = parent->heap_end;
+
         break;
       }
 
@@ -281,6 +312,11 @@ int do_fork(process* parent) {
   child->status = READY;
   child->trapframe->regs.a0 = 0;
   child->parent = parent;
+  child->debugline = parent->debugline;
+  child->dir = parent->dir;
+  child->file = parent->file;
+  child->line = parent->line;
+  child->line_ind = parent->line_ind;
   insert_to_ready_queue(child);
 
   return child->pid;
@@ -383,6 +419,9 @@ int do_exec(process *proc, const char *path, const char *arg) {
   newp.user_heap.heap_top = USER_FREE_ADDRESS_START;
   newp.user_heap.heap_bottom = USER_FREE_ADDRESS_START;
   newp.user_heap.free_pages_count = 0;
+  newp.heap_head = 0;
+  newp.heap_tail = 0;
+  newp.heap_end = USER_FREE_ADDRESS_START;
   newp.mapped_info[HEAP_SEGMENT].va = USER_FREE_ADDRESS_START;
   newp.mapped_info[HEAP_SEGMENT].npages = 0;
   newp.mapped_info[HEAP_SEGMENT].seg_type = HEAP_SEGMENT;
@@ -434,7 +473,27 @@ int do_exec(process *proc, const char *path, const char *arg) {
   proc->mapped_info = newp.mapped_info;
   proc->total_mapped_region = newp.total_mapped_region;
   proc->user_heap = newp.user_heap;
+  proc->heap_head = newp.heap_head;
+  proc->heap_tail = newp.heap_tail;
+  proc->heap_end = newp.heap_end;
+  proc->debugline = newp.debugline;
+  proc->dir = newp.dir;
+  proc->file = newp.file;
+  proc->line = newp.line;
+  proc->line_ind = newp.line_ind;
   proc->tick_count = 0;
 
   return 0;
 }
+
+
+
+
+
+
+
+
+
+
+
+

@@ -8,4 +8,9 @@ void* alloc_page();
 // Free an allocated page
 void free_page(void* pa);
 
+// page reference counting (for COW)
+void page_ref_inc(void *pa);
+int page_ref_dec(void *pa);
+int page_ref_get(void *pa);
+
 #endif

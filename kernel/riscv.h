@@ -199,6 +199,12 @@ static inline void flush_tlb(void) { asm volatile("sfence.vma zero, zero"); }
 #define PTE_A (1L << 6)  // accessed
 #define PTE_D (1L << 7)  // dirty
 
+// RISC-V Sv39 PTE bits 8-9 are reserved for software (RSW).
+// We use one of them to mark a PTE as copy-on-write.
+#define PTE_RSW0 (1L << 8)
+#define PTE_RSW1 (1L << 9)
+#define PTE_COW  PTE_RSW0
+
 // shift a physical address to the right place for a PTE.
 #define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
 
@@ -224,3 +230,4 @@ typedef uint64 pte_t;
 typedef uint64 *pagetable_t;  // 512 PTEs
 
 #endif
+
