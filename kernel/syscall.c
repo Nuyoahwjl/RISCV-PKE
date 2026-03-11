@@ -19,6 +19,7 @@
 #include "elf.h"
 
 #include "spike_interface/spike_utils.h"
+#include "spike_interface/spike_htif.h"
 
 // -----------------------------------------------------------------------------
 // path helpers for relative-path challenge
@@ -290,6 +291,7 @@ uint64 sys_user_better_free(uint64 user_ptr) {
 // semaphores challenge
 // -----------------------------------------------------------------------------
 #define NSEM 16
+#define EXEC_MAX_ARGS 8
 
 typedef struct semaphore_t {
   int used;
@@ -431,16 +433,49 @@ ssize_t sys_user_yield() {
 
 ssize_t sys_user_wait(long pid) { return do_wait(pid); }
 
-ssize_t sys_user_exec(char *pathva, char *argva) {
+ssize_t sys_user_waitpid(long pid, int nohang) {
+  return do_waitpid((int)pid, nohang);
+}
+
+ssize_t sys_user_getchar(void) {
+  int ch = -1;
+  while (ch < 0) ch = htif_console_getchar();
+  if (ch == '\r') ch = '\n';
+  return ch;
+}
+
+static uint64 read_user_word(uint64 uva) {
+  uint64 pa = lookup_pa((pagetable_t)current->pagetable, uva);
+  if (pa == 0) return 0;
+  return *((uint64 *)(pa + (uva & (PGSIZE - 1))));
+}
+
+ssize_t sys_user_exec(char *pathva, int argc, char **argvva) {
   char *pathpa =
       (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)pathva);
+  char kpath[MAX_PATH_LEN];
+  char kargs[EXEC_MAX_ARGS][MAX_PATH_LEN];
+  char *kargv[EXEC_MAX_ARGS];
 
-  char *argpa = 0;
-  if (argva)
-    argpa =
-        (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)argva);
+  if (pathpa == 0) return -1;
+  resolve_user_path(pathpa, kpath);
 
-  return do_exec(current, pathpa, argpa);
+  if (argc < 0 || argc > EXEC_MAX_ARGS) return -1;
+
+  for (int i = 0; i < argc; i++) {
+    uint64 arg_uva = read_user_word((uint64)argvva + i * sizeof(uint64));
+    if (arg_uva == 0) return -1;
+
+    char *arg_pa =
+        (char *)user_va_to_pa((pagetable_t)(current->pagetable), (void *)arg_uva);
+    if (arg_pa == 0) return -1;
+
+    memset(kargs[i], 0, sizeof(kargs[i]));
+    strcpy(kargs[i], arg_pa);
+    kargv[i] = kargs[i];
+  }
+
+  return do_exec(current, kpath, argc, argc > 0 ? kargv : 0);
 }
 
 ssize_t sys_user_printpa(uint64 va) {
@@ -628,6 +663,8 @@ long do_syscall(long a0,
       return sys_user_yield();
     case SYS_user_wait:
       return sys_user_wait(a1);
+    case SYS_user_waitpid:
+      return sys_user_waitpid(a1, a2);
 
     case SYS_user_print_backtrace:
       return sys_user_print_backtrace(a1);
@@ -649,6 +686,8 @@ long do_syscall(long a0,
       return sys_user_rcwd((char *)a1);
     case SYS_user_ccwd:
       return sys_user_ccwd((char *)a1);
+    case SYS_user_getchar:
+      return sys_user_getchar();
 
     case SYS_user_open:
       return sys_user_open((char *)a1, a2);
@@ -677,7 +716,7 @@ long do_syscall(long a0,
     case SYS_user_unlink:
       return sys_user_unlink((char *)a1);
     case SYS_user_exec:
-      return sys_user_exec((char *)a1, (char *)a2);
+      return sys_user_exec((char *)a1, a2, (char **)a3);
 
     default:
       panic("Unknown syscall %ld \n", a0);

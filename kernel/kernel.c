@@ -76,6 +76,8 @@ process* load_user_program() {
   if (!argc) panic("You need to specify the application program!\n");
 
   load_bincode_from_host_elf(proc, arg_bug_msg.argv[0]);
+  if (setup_user_args(proc, argc, arg_bug_msg.argv) < 0)
+    panic("Fail on initializing user argv on stack.\n");
   return proc;
 }
 

@@ -1,7 +1,7 @@
 /*
- * Utility functions for process management. 
+ * Utility functions for process management.
  *
- * Note: in Lab1, only one process (i.e., our user application) exists. Therefore, 
+ * Note: in Lab1, only one process (i.e., our user application) exists. Therefore,
  * PKE OS at this stage will set "current" to the loaded user application, and also
  * switch to the old "current" process after trap handling.
  */
@@ -17,6 +17,7 @@
 #include "memlayout.h"
 #include "sched.h"
 #include "spike_interface/spike_utils.h"
+#include "util/functions.h"
 
 //Two functions defined in kernel/usertrap.S
 extern char smode_trap_vector[];
@@ -31,6 +32,48 @@ process procs[NPROC];
 
 // current points to the currently running user-mode application.
 process* current = NULL;
+
+#define EXEC_MAX_ARGS 8
+
+int setup_user_args(process *proc, int argc, char **argv) {
+  if (!proc) return -1;
+  if (argc < 0 || argc > EXEC_MAX_ARGS) return -1;
+
+  uint64 stack_base = USER_STACK_TOP - PGSIZE;
+  char *stack_pa = (char *)lookup_pa((pagetable_t)proc->pagetable, stack_base);
+  if (!stack_pa) return -1;
+
+  uint64 sp = USER_STACK_TOP;
+  uint64 argv_user[EXEC_MAX_ARGS];
+
+  for (int i = argc - 1; i >= 0; i--) {
+    int len = (int)strlen(argv[i]) + 1;
+    sp -= len;
+    if (sp < stack_base) return -1;
+    memcpy(stack_pa + (sp - stack_base), argv[i], len);
+    argv_user[i] = sp;
+  }
+
+  sp &= ~0xFUL;
+
+  if (argc > 0) {
+    sp -= (argc + 1) * sizeof(uint64);
+    if (sp < stack_base) return -1;
+
+    uint64 *argv_pa = (uint64 *)(stack_pa + (sp - stack_base));
+    for (int i = 0; i < argc; i++) argv_pa[i] = argv_user[i];
+    argv_pa[argc] = 0;
+
+    proc->trapframe->regs.a0 = argc;
+    proc->trapframe->regs.a1 = sp;
+  } else {
+    proc->trapframe->regs.a0 = 0;
+    proc->trapframe->regs.a1 = 0;
+  }
+
+  proc->trapframe->regs.sp = sp & ~0xFUL;
+  return 0;
+}
 
 //
 // switch to a user-mode process
@@ -260,12 +303,19 @@ int do_fork(process* parent) {
         break;
       }
 
-      case CODE_SEGMENT:
-        map_pages(child->pagetable,
-                  parent->mapped_info[i].va,
-                  parent->mapped_info[i].npages * PGSIZE,
-                  lookup_pa(parent->pagetable, parent->mapped_info[i].va),
-                  prot_to_type(PROT_EXEC | PROT_READ, 1));
+      case CODE_SEGMENT: {
+        uint64 seg_start = ROUNDDOWN(parent->mapped_info[i].va, PGSIZE);
+        int pages = parent->mapped_info[i].npages;
+
+        for (int k = 0; k < pages; k++) {
+          uint64 va = seg_start + (uint64)k * PGSIZE;
+          uint64 pa = lookup_pa(parent->pagetable, va);
+          map_pages(child->pagetable,
+                    va,
+                    PGSIZE,
+                    pa,
+                    prot_to_type(PROT_EXEC | PROT_READ, 1));
+        }
 
         child->mapped_info[child->total_mapped_region].va =
             parent->mapped_info[i].va;
@@ -274,13 +324,14 @@ int do_fork(process* parent) {
         child->mapped_info[child->total_mapped_region].seg_type = CODE_SEGMENT;
         child->total_mapped_region++;
         break;
+      }
 
       case DATA_SEGMENT: {
-        uint64 start_va = parent->mapped_info[i].va;
+        uint64 seg_start = ROUNDDOWN(parent->mapped_info[i].va, PGSIZE);
         int pages = parent->mapped_info[i].npages;
 
         for (int k = 0; k < pages; k++) {
-          uint64 va = start_va + (uint64)k * PGSIZE;
+          uint64 va = seg_start + (uint64)k * PGSIZE;
           uint64 old_pa = lookup_pa(parent->pagetable, va);
 
           char *pa_copy = alloc_page();
@@ -299,11 +350,11 @@ int do_fork(process* parent) {
             parent->mapped_info[i].npages;
         child->mapped_info[child->total_mapped_region].seg_type = DATA_SEGMENT;
         child->total_mapped_region++;
-        
+
         sprint( "do_fork map code segment at pa:%lx of parent to child at va:%lx.\n",
           lookup_pa(parent->pagetable, parent->mapped_info[i].va),
           parent->mapped_info[i].va );
-        
+
         break;
       }
     }
@@ -322,18 +373,17 @@ int do_fork(process* parent) {
   return child->pid;
 }
 
-int do_wait(int pid) {
+int do_wait(int pid) { return do_waitpid(pid, 0); }
+
+int do_waitpid(int pid, int nohang) {
   while (1) {
     int has_child = 0;
 
     for (int i = 0; i < NPROC; i++) {
       process *cp = &procs[i];
 
-      if (cp->parent != current)
-        continue;
-
-      if (pid != -1 && cp->pid != (uint64)pid)
-        continue;
+      if (cp->parent != current) continue;
+      if (pid != -1 && cp->pid != (uint64)pid) continue;
 
       has_child = 1;
       if (cp->status == ZOMBIE) {
@@ -342,48 +392,48 @@ int do_wait(int pid) {
       }
     }
 
-    if (!has_child)
-      return -1;
+    if (!has_child) return -1;
+    if (nohang) return 0;
 
     insert_to_blocked_queue(current);
     schedule();
   }
 }
 
-int do_exec(process *proc, const char *path, const char *arg) {
+int do_exec(process *proc, const char *path, int argc, char **argv) {
   if (proc == NULL || path == NULL) return -1;
 
   char kpath[MAX_PATH_LEN];
-  char karg[MAX_PATH_LEN];
+  char kargv[EXEC_MAX_ARGS][MAX_PATH_LEN];
+  char *argv_ptrs[EXEC_MAX_ARGS];
   memset(kpath, 0, sizeof(kpath));
-  memset(karg, 0, sizeof(karg));
   strcpy(kpath, path);
-  if (arg) strcpy(karg, arg);
 
-  // 用临时 process 构造新的用户地址空间
+  if (argc < 0 || argc > EXEC_MAX_ARGS) return -1;
+  for (int i = 0; i < argc; i++) {
+    memset(kargv[i], 0, sizeof(kargv[i]));
+    strcpy(kargv[i], argv[i]);
+    argv_ptrs[i] = kargv[i];
+  }
+
   process newp;
   memset(&newp, 0, sizeof(newp));
 
-  // 保留当前进程的“身份”和文件管理结构
   newp.pid = proc->pid;
   newp.kstack = proc->kstack;
   newp.parent = proc->parent;
   newp.pfiles = proc->pfiles;
   newp.status = proc->status;
 
-  // trapframe
   newp.trapframe = (trapframe *)alloc_page();
   memset(newp.trapframe, 0, sizeof(trapframe));
 
-  // pagetable
   newp.pagetable = (pagetable_t)alloc_page();
   memset((void *)newp.pagetable, 0, PGSIZE);
 
-  // mapped_info
   newp.mapped_info = (mapped_region *)alloc_page();
   memset(newp.mapped_info, 0, PGSIZE);
 
-  // user stack
   uint64 user_stack_pa = (uint64)alloc_page();
   newp.trapframe->regs.sp = USER_STACK_TOP;
   user_vm_map((pagetable_t)newp.pagetable,
@@ -395,7 +445,6 @@ int do_exec(process *proc, const char *path, const char *arg) {
   newp.mapped_info[STACK_SEGMENT].npages = 1;
   newp.mapped_info[STACK_SEGMENT].seg_type = STACK_SEGMENT;
 
-  // trapframe direct mapping
   user_vm_map((pagetable_t)newp.pagetable,
               (uint64)newp.trapframe,
               PGSIZE,
@@ -405,7 +454,6 @@ int do_exec(process *proc, const char *path, const char *arg) {
   newp.mapped_info[CONTEXT_SEGMENT].npages = 1;
   newp.mapped_info[CONTEXT_SEGMENT].seg_type = CONTEXT_SEGMENT;
 
-  // trap vector section
   user_vm_map((pagetable_t)newp.pagetable,
               (uint64)trap_sec_start,
               PGSIZE,
@@ -415,7 +463,6 @@ int do_exec(process *proc, const char *path, const char *arg) {
   newp.mapped_info[SYSTEM_SEGMENT].npages = 1;
   newp.mapped_info[SYSTEM_SEGMENT].seg_type = SYSTEM_SEGMENT;
 
-  // heap manager
   newp.user_heap.heap_top = USER_FREE_ADDRESS_START;
   newp.user_heap.heap_bottom = USER_FREE_ADDRESS_START;
   newp.user_heap.free_pages_count = 0;
@@ -428,46 +475,13 @@ int do_exec(process *proc, const char *path, const char *arg) {
 
   newp.total_mapped_region = 4;
 
-  // 装入新的 ELF
   if (load_bincode_from_path(&newp, kpath) < 0) {
     sprint("do_exec: load_bincode_from_path failed.\n");
     return -1;
   }
 
-  // 传一个参数给新程序：argc=1, argv[0]=arg
-  if (arg != NULL) {
-    uint64 arg_page_va = USER_FREE_ADDRESS_START;
-    uint64 arg_page_pa = (uint64)alloc_page();
-    memset((void *)arg_page_pa, 0, PGSIZE);
+  if (setup_user_args(&newp, argc, argc > 0 ? argv_ptrs : 0) < 0) return -1;
 
-    user_vm_map((pagetable_t)newp.pagetable,
-                arg_page_va,
-                PGSIZE,
-                arg_page_pa,
-                prot_to_type(PROT_WRITE | PROT_READ, 1));
-
-    char *arg_str_va = (char *)arg_page_va;
-    uint64 *argv_va = (uint64 *)(arg_page_va + 128);
-
-    char *arg_page_kva =
-        (char *)lookup_pa((pagetable_t)newp.pagetable, arg_page_va);
-
-    strcpy(arg_page_kva, karg);
-    ((uint64 *)(arg_page_kva + 128))[0] = (uint64)arg_str_va;
-    ((uint64 *)(arg_page_kva + 128))[1] = 0;
-
-    newp.trapframe->regs.a0 = 1;              // argc
-    newp.trapframe->regs.a1 = (uint64)argv_va; // argv
-
-    // 占掉 heap 首页，避免后续 naive_malloc 覆盖参数页
-    newp.user_heap.heap_top += PGSIZE;
-    newp.mapped_info[HEAP_SEGMENT].npages = 1;
-  } else {
-    newp.trapframe->regs.a0 = 0;
-    newp.trapframe->regs.a1 = 0;
-  }
-
-  // 提交新的用户地址空间
   proc->pagetable = newp.pagetable;
   proc->trapframe = newp.trapframe;
   proc->mapped_info = newp.mapped_info;
@@ -485,15 +499,4 @@ int do_exec(process *proc, const char *path, const char *arg) {
 
   return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
 

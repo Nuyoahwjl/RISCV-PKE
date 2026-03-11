@@ -3,8 +3,14 @@
 #include "util/types.h"
 
 int main(int argc, char *argv[]) {
+  if (argc < 2) {
+    printu("usage: touch <file>\n");
+    exit(-1);
+    return -1;
+  }
+
   int fd;
-  char *filename = argv[0];
+  char *filename = argv[1];
   printu("\n======== touch command ========\n");
   printu("touch: %s\n", filename);
 

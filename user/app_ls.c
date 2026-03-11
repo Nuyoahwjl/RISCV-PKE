@@ -3,8 +3,19 @@
 #include "util/types.h"
 
 int main(int argc, char *argv[]) {
-  char *path = argv[0];
+  if (argc < 2) {
+    printu("usage: ls <path>\n");
+    exit(-1);
+    return -1;
+  }
+
+  char *path = argv[1];
   int dir_fd = opendir_u(path);
+  if (dir_fd < 0) {
+    printu("ls failed: %s\n", path);
+    exit(-1);
+    return -1;
+  }
   printu("---------- ls command -----------\n");
   printu("ls \"%s\":\n", path);
   printu("[name]               [inode_num]\n");

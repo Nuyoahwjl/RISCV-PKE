@@ -18,7 +18,9 @@ void better_free(void* va);
 int fork();
 void yield();
 int wait(int pid);
-int exec(const char *pathname, const char *arg);
+int waitpid(int pid, int nohang);
+int exec(const char *pathname, int argc, char *argv[]);
+int getchar_u(void);
 
 int print_backtrace(int n);
 void printpa(int *va);

@@ -59,9 +59,17 @@ void yield() { do_user_call(SYS_user_yield, 0, 0, 0, 0, 0, 0, 0); }
 
 int wait(int pid) { return do_user_call(SYS_user_wait, pid, 0, 0, 0, 0, 0, 0); }
 
-int exec(const char *pathname, const char *arg) {
-  return do_user_call(SYS_user_exec, (uint64)pathname, (uint64)arg, 0, 0, 0, 0,
-                      0);
+int waitpid(int pid, int nohang) {
+  return do_user_call(SYS_user_waitpid, pid, nohang, 0, 0, 0, 0, 0);
+}
+
+int exec(const char *pathname, int argc, char *argv[]) {
+  return do_user_call(SYS_user_exec, (uint64)pathname, argc, (uint64)argv, 0, 0,
+                      0, 0);
+}
+
+int getchar_u(void) {
+  return do_user_call(SYS_user_getchar, 0, 0, 0, 0, 0, 0, 0);
 }
 
 int print_backtrace(int n) {

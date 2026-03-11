@@ -4,7 +4,13 @@
 
 
 int main(int argc, char *argv[]) {
-  char *new_dir = argv[0];
+  if (argc < 2) {
+    printu("usage: mkdir <dir>\n");
+    exit(-1);
+    return -1;
+  }
+
+  char *new_dir = argv[1];
   printu("\n======== mkdir command ========\n");
 
   mkdir_u(new_dir);

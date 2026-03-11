@@ -1,0 +1,11 @@
+pwd
+ls /RAMDISK0
+mkdir /RAMDISK0/demo
+touch /RAMDISK0/demo/a
+writehello /RAMDISK0/demo/a
+cat /RAMDISK0/demo/a
+app0 &
+app1 &
+jobs
+waitall
+
